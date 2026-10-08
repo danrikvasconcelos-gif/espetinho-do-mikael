@@ -20,6 +20,19 @@ const lin=(m,it)=>Object.entries(it||{}).filter(([id,q])=>q>0&&m.some(x=>x.id==i
 const mp=l=>Object.fromEntries(l.map(i=>[i.id,i.qtd]));
 const soma=l=>l.reduce((s,i)=>s+i.qtd*i.preco,0);
 const push=v=>r('RPUSH','sales:'+hoje(),JSON.stringify({...v,hora:hora()}));
+const kcoz=(m,it)=>Object.fromEntries(Object.entries(it||{}).filter(([id,q])=>q>0&&(m.find(x=>x.id==id)||{}).cozinha));
+const kNovo=async(m,base,it)=>{const ki=kcoz(m,it);if(!Object.keys(ki).length)return;const id=await r('INCR','kseq');await r('HSET','kitchen',id,JSON.stringify({id,...base,itens:ki,ts:hora(),t0:Date.now(),status:'novo'}))};
+const kMesa=async(m,mesa,garcom,id,d)=>{
+ if(!(m.find(x=>x.id==id)||{}).cozinha)return;
+ const kid=await r('HGET','kmesa',mesa),t=kid?J(await r('HGET','kitchen',kid)):null;
+ if(d>0){
+  if(t&&t.status==='novo'){t.itens[id]=(t.itens[id]||0)+1;await r('HSET','kitchen',kid,JSON.stringify(t))}
+  else{const n=await r('INCR','kseq');await r('HSET','kitchen',n,JSON.stringify({id:n,origem:'mesa',mesa,garcom,itens:{[id]:1},ts:hora(),t0:Date.now(),status:'novo'}));await r('HSET','kmesa',mesa,n)}
+ }else if(t&&t.status==='novo'&&t.itens[id]>0){
+  t.itens[id]--;if(!t.itens[id])delete t.itens[id];
+  if(Object.keys(t.itens).length)await r('HSET','kitchen',kid,JSON.stringify(t));else{await r('HDEL','kitchen',kid);await r('HDEL','kmesa',mesa)}
+ }
+};
 const ob=x=>Object.fromEntries(Object.entries(H(x)).map(([k,v])=>[k,J(v)]));
 module.exports=async(req,res)=>{
  try{
@@ -32,7 +45,7 @@ module.exports=async(req,res)=>{
    if(f){const p=m.find(x=>x.id==f);return er(409,'Sem estoque suficiente: '+(p?p.nome:f))}
    const id=await r('INCR','seq'),ent=b.tipo==='Entrega';
    await r('HSET','orders',id,JSON.stringify({id,ts:hora(),cliente:String(b.nome||'').slice(0,60),tipo:ent?'Entrega':'Retirada',end:String(b.end||'').slice(0,160),pgto:String(b.pgto||'').slice(0,20),obs:String(b.obs||'').slice(0,200),taxa:ent?Math.max(0,+b.taxa||0):0,itens:it}));
-   return res.json({id,subtotal:soma(l)});
+   await kNovo(m,{origem:'whatsapp',pedido:id,cliente:String(b.nome||'').slice(0,60),tipo:ent?'Entrega':'Retirada'},it);return res.json({id,subtotal:soma(l)});
   }
   // ---- área do dono ----
   if(a==='login'){
@@ -53,10 +66,23 @@ module.exports=async(req,res)=>{
   if(!perfil)return er(401,'Sessão expirada. Entre novamente.');
   if(a==='logout'){await r('DEL','sess:'+tk);return ok()}
   if(perfil==='garcom'){if(!['mesas','mesa_abrir','mesa_item','mesa_fechar'].includes(a))return er(403,'Perfil de garçom: use a página /garcom.')}
+  else if(perfil==='cozinha'){if(!['cozinha','coz_pronto','coz_desfazer'].includes(a))return er(403,'Perfil de cozinha: use a página /cozinha.')}
   else if(perfil!=='admin'&&a!=='state')return er(403,'Seu perfil é somente de visualização.');
-  if(a==='mesas'){const [s,t]=await Promise.all([r('HGETALL','stock'),r('HGETALL','tables')]);return res.json({perfil,usuario:un,menu:m,estoque:H(s),mesas:ob(t)})}
+  if(a==='mesas'){const [s,t,k]=await Promise.all([r('HGETALL','stock'),r('HGETALL','tables'),r('HGETALL','kitchen')]);const coz={};Object.values(ob(k)).forEach(x=>{if(x.origem!=='mesa'||Date.now()-x.t0>10800000)return;const c=coz[x.mesa]=coz[x.mesa]||{novo:0,pronto:0};const n=Object.values(x.itens).reduce((a,v)=>a+v,0);if(x.status==='novo')c.novo+=n;else c.pronto+=n});return res.json({perfil,usuario:un,menu:m,estoque:H(s),mesas:ob(t),coz})}
+  if(a==='cozinha'){
+   const ks=ob(await r('HGETALL','kitchen')),ag=Date.now();
+   for(const [k,x] of Object.entries(ks))if(x.status==='pronto'&&ag-x.pronto>43200000){await r('HDEL','kitchen',k);delete ks[k]}
+   const L=Object.values(ks).sort((x,y)=>x.id-y.id);
+   return res.json({perfil,usuario:un,menu:m,novos:L.filter(x=>x.status==='novo'),prontos:L.filter(x=>x.status==='pronto'&&ag-x.pronto<10800000).slice(-15)});
+  }
+  if(a==='coz_pronto'||a==='coz_desfazer'){
+   const x=J(await r('HGET','kitchen',b.id));if(!x)return er(404,'Pedido não encontrado');
+   if(a==='coz_pronto'){x.status='pronto';x.pronto=Date.now();const cur=x.origem==='mesa'?await r('HGET','kmesa',x.mesa):null;if(String(cur)===String(x.id))await r('HDEL','kmesa',x.mesa)}
+   else{x.status='novo';delete x.pronto}
+   await r('HSET','kitchen',b.id,JSON.stringify(x));return ok();
+  }
   if(a==='usuario_salvar'){
-   const u=String(b.usuario||'').trim().toLowerCase(),sn=String(b.senha||''),pf=['admin','garcom'].includes(b.perfil)?b.perfil:'visualizacao';
+   const u=String(b.usuario||'').trim().toLowerCase(),sn=String(b.senha||''),pf=['admin','garcom','cozinha'].includes(b.perfil)?b.perfil:'visualizacao';
    if(!/^[a-z0-9._-]{3,30}$/.test(u)||u==='admin')return er(400,'Nome de usuário inválido ou reservado.');
    if(sn.length<8)return er(400,'A senha precisa ter pelo menos 8 caracteres.');
    await r('HSET','users',u,JSON.stringify({hash:hs(sn),perfil:pf}));return ok();
@@ -76,20 +102,20 @@ module.exports=async(req,res)=>{
   if(a==='mesa_item'){
    if(!t)return er(404,'Mesa não encontrada');
    const q=t.itens[b.id]||0;
-   if(b.d>0){if(await take({[b.id]:1}))return er(409,'Sem estoque');t.itens[b.id]=q+1}
-   else if(q>0){await give({[b.id]:1});t.itens[b.id]=q-1;if(!t.itens[b.id])delete t.itens[b.id]}
+   if(b.d>0){if(await take({[b.id]:1}))return er(409,'Sem estoque');t.itens[b.id]=q+1;await kMesa(m,b.mesa,t.garcom,b.id,1)}
+   else if(q>0){await give({[b.id]:1});t.itens[b.id]=q-1;if(!t.itens[b.id])delete t.itens[b.id];await kMesa(m,b.mesa,t.garcom,b.id,-1)}
    await r('HSET','tables',b.mesa,JSON.stringify(t));return ok();
   }
   if(a==='mesa_fechar'){
    if(!t)return er(404,'Mesa não encontrada');
    const l=lin(m,t.itens);
    if(l.length)await push({canal:'mesa',mesa:b.mesa,garcom:t.garcom,itens:l,total:soma(l),pgto:b.pgto});
-   await r('HDEL','tables',b.mesa);return ok();
+   await r('HDEL','kmesa',b.mesa);await r('HDEL','tables',b.mesa);return ok();
   }
   const o=a&&a.startsWith('wpp_')?J(await r('HGET','orders',b.id)):null;
   if(a==='wpp_fechar'||a==='wpp_cancelar'){
    if(!o)return er(404,'Pedido não encontrado');
-   if(a==='wpp_cancelar')await give(o.itens);
+   if(a==='wpp_cancelar'){await give(o.itens);const ks=ob(await r('HGETALL','kitchen'));for(const [k,x] of Object.entries(ks))if(x.origem==='whatsapp'&&x.pedido===o.id&&x.status==='novo')await r('HDEL','kitchen',k)}
    else{const l=lin(m,o.itens);await push({canal:'whatsapp',pedido:o.id,cliente:o.cliente,tipo:o.tipo,itens:l,taxa:o.taxa,total:soma(l)+o.taxa,pgto:b.pgto})}
    await r('HDEL','orders',b.id);return ok();
   }

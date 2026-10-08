@@ -53,7 +53,8 @@ $('sair').onclick=async()=>{try{await api({a:'logout'})}catch(e){}limpar()};
 document.addEventListener('visibilitychange',()=>{if(!document.hidden&&tok&&!$('app').hidden)load().catch(()=>{})});
 const pode=t=>S.perfil==='admin'||t.garcom===S.usuario;
 const chips=n=>[...new Set(S.menu.map(p=>p.cat))].map(c=>`<h2>${esc(c)}</h2><div class="chips">${S.menu.filter(p=>p.cat===c).map(p=>{const e=+S.estoque[p.id]||0;return `<button class="chip" ${e>0?'':'disabled'} onclick="item('${n}',${p.id},1)">${esc(p.nome)}<small>${brl(p.preco)} · ${e>0?e+' disponíveis':'esgotado'}</small></button>`}).join('')}</div>`).join('');
-const card=(n,t)=>`<div class="card"><h3>Mesa ${n}</h3>
+const cz=n=>{const c=(S.coz||{})[n];if(!c)return '';return c.novo?`<small>Cozinha: preparando ${c.novo} ${c.novo>1?'itens':'item'}</small>`:(c.pronto?'<small>Cozinha: pronto ✓</small>':'')};
+const card=(n,t)=>`<div class="card"><h3>Mesa ${n}</h3>${cz(n)}
  ${Object.entries(t.itens).map(([id,q])=>`<div class="ln"><span>${esc(P(id).nome)}<br><small>${brl(P(id).preco)} cada</small></span><span class="q"><button onclick="item('${n}',${id},-1)">−</button><b>${q}</b><button onclick="item('${n}',${id},1)">+</button></span></div>`).join('')||'<small>Nenhum item ainda.</small>'}
  <details ${ab[n]?'open':''} ontoggle="ab['${n}']=this.open"><summary>Adicionar item</summary>${chips(n)}</details>
  <div class="tot">Conta: ${brl(tot(t.itens))}</div>
